@@ -17,7 +17,7 @@ import java.util.Optional;
 @RequestMapping("/engine_rule_forward_chain")
 public class ApiForwardChain {
 
-    //llaves contexto
+    //llaves - contexto
     private static final String K_VALOR_VENTA = "valorVenta";
     private static final String K_VALOR_NETO  = "valorNeto";
     private static final String K_IVA         = "iva";
@@ -61,7 +61,7 @@ public class ApiForwardChain {
             // Publica output en el contexto: habilita IVA
             ctx.put(K_VALOR_NETO, comision);
 
-            return "OK " + id() + " -> valorNeto=" + comision;
+            return id() + " -> valorNeto=" + comision;
         }
     }
 
@@ -96,7 +96,7 @@ public class ApiForwardChain {
             // Publica output en el contexto para reglas futuras
             ctx.put(K_IVA, iva);
 
-            return "OK " + id() + " -> iva=" + iva + " (tasa=" + tasaIVA + ")";
+            return id() + " -> iva=" + iva + " (tasa=" + tasaIVA + ")";
         }
     }
 
@@ -134,8 +134,9 @@ public class ApiForwardChain {
             liquidationResults.addAll(trace);
 
             // Resultado final del contexto del tercero (para ver outputs)
-            liquidationResults.add("Contexto final keys: " + ctxTercero.keySet());
-            liquidationResults.add("Contexto final valores: " + ctxTercero);
+            // Esto nos sirve para trazabilidad de lo que se ejecutó y los resultados
+//            liquidationResults.add("Contexto final keys: " + ctxTercero.keySet());
+//            liquidationResults.add("Contexto final valores: " + ctxTercero);
         }
 
         return liquidationResults;
@@ -161,15 +162,13 @@ public class ApiForwardChain {
             round++;
             progress = false;
 
-        //out.add("---- Ronda " + round + " | pending=" + pending.stream().map(Records2.Regla::nombre).toList() + " | ctxKeys=" + ctx.keySet());
-
             Iterator<Records2.Regla> it = pending.iterator();
             while (it.hasNext()) {
                 Records2.Regla regla = it.next();
 
                 RuleStrategy strategy = registry.get(regla.nombre());
                 if (strategy == null) {
-                    // Para conceptualizar: falla rápido si viene una regla no soportada
+                    // falla rápido si viene una regla no soportada
                     throw new IllegalArgumentException("Regla no soportada: " + regla.nombre());
                 }
 
@@ -185,20 +184,21 @@ public class ApiForwardChain {
 
         } while (progress && !pending.isEmpty());
 
-        // Si quedaron pendientes y ya no hubo progreso, algo faltó o hay dependencia imposible
+        // Si quedaron pendientes y ya no hubo progreso algo faltó o hay dependencia imposible
         if (!pending.isEmpty()) {
             out.add("Bloqueo: no se pudieron ejecutar reglas: "
                     + pending.stream().map(Records2.Regla::nombre).toList());
             out.add("Context keys actuales: " + ctx.keySet());
-            out.add("Esto significa: faltan insumos o una regla requiere algo que ninguna produce.");
+//            out.add(" faltan insumos o una regla requiere algo que ninguna produce.");
         } else {
-            out.add("Todas las reglas ejecutadas correctamente.");
+//            out.add("Todas las reglas ejecutadas correctamente.");
+            out.add("========================================");
         }
 
         return out;
     }
 
-    // Helpers
+    // Helper
     private static Optional<BigDecimal> getVar(Records2.Regla regla, String name) {
         if (regla.variables() == null) return Optional.empty();
         return regla.variables().stream()
