@@ -1,5 +1,10 @@
 package com.co.engine_rule_v2.infrastructure.controller;
 
+import org.springframework.expression.EvaluationContext;
+import org.springframework.expression.Expression;
+import org.springframework.expression.ExpressionParser;
+import org.springframework.expression.spel.standard.SpelExpressionParser;
+import org.springframework.expression.spel.support.SimpleEvaluationContext;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -21,7 +26,7 @@ public class ApiForwardChain {
     private static final String K_VALOR_VENTA = "valorVenta";
     private static final String K_VALOR_NETO  = "valorNeto";
     private static final String K_IVA         = "iva";
-
+//    private static final String K_MONTO = "monto";
     //Strategy - Regla
     interface RuleStrategy {
         String id();
@@ -87,7 +92,6 @@ public class ApiForwardChain {
         @Override
         public String execute(Map<String, BigDecimal> ctx, Records2.Regla regla) {
             BigDecimal valorNeto = ctx.get(K_VALOR_NETO);
-
             BigDecimal tasaIVA = getVar(regla, "valorPorcentaje")
                     .orElse(new BigDecimal("0.19"));
 
@@ -100,10 +104,100 @@ public class ApiForwardChain {
         }
     }
 
+    /*IMPLEMEBNTACION CLACULO RANGO*/
+
+    static class RangoSpEL implements RuleStrategy {
+
+        private static final ExpressionParser PARSER = new SpelExpressionParser();
+
+        @Override
+        public String id() {
+            // no es relevante porque la usaremos como fallback por tipo=RANGO
+            return "RANGO_GENERIC_SPEL";
+        }
+
+        @Override
+        public boolean canExecute(Map<String, BigDecimal> ctx, Records2.Regla regla) {
+            // Solo si es regla de rango, hay monto y aún no se produjo valorNeto (ajústalo si quieres otro output)
+            return "RANGO".equalsIgnoreCase(regla.tipo())
+                    && ctx.containsKey(K_VALOR_VENTA)
+                    && !ctx.containsKey(K_VALOR_NETO);
+        }
+
+        @Override
+        public String execute(Map<String, BigDecimal> ctx, Records2.Regla regla) {
+            var rangos = (regla.variables() == null) ? List.<Records2.Variables>of()
+                    : regla.variables().stream()
+                    .filter(v -> v.condicion() != null && v.expresion() != null)
+                    .toList();
+
+            if (rangos.isEmpty()) {
+                throw new IllegalArgumentException("Regla tipo RANGO sin items {condicion, expresion}: " + regla.nombre());
+            }
+
+            EvaluationContext ec = buildContext(ctx);
+
+            for (Records2.Variables item : rangos) {
+                boolean ok = evalBool(item.condicion(), ec);
+                if (ok) {
+                    BigDecimal result = evalNumberToBigDecimal(item.expresion(), ec);
+                    ctx.put(K_VALOR_NETO, result); // output mínimo para encadenar con IVA
+                    return regla.nombre() + " -> valorNeto=" + result + " (cond=" + item.condicion() + ")";
+                }
+            }
+
+
+            throw new IllegalStateException("Ningún rango aplicó para " + regla.nombre()
+                    + " con valorVenta=" + ctx.get(K_VALOR_VENTA));
+
+        }
+
+        private EvaluationContext buildContext(Map<String, BigDecimal> ctx) {
+            // Contexto “simple” (sin acceso a beans, sin invocación de métodos/types)
+            SimpleEvaluationContext ec = SimpleEvaluationContext.forReadOnlyDataBinding().build();
+
+            // Variables disponibles para SpEL
+            // En tus condiciones usas #monto, #valorVenta, etc.
+            ctx.forEach(ec::setVariable);
+            return ec;
+        }
+
+        private boolean evalBool(String condition, EvaluationContext ec) {
+            Expression exp = PARSER.parseExpression(condition);
+            Boolean value = exp.getValue(ec, Boolean.class);
+            if (value == null) throw new IllegalArgumentException("Condición devolvió null: " + condition);
+            return value;
+        }
+
+        private BigDecimal evalNumberToBigDecimal(String expression, EvaluationContext ec) {
+            Expression exp = PARSER.parseExpression(expression);
+            Object raw = exp.getValue(ec);
+
+            if (raw == null) {
+                throw new IllegalArgumentException("Expresión devolvió null: " + expression);
+            }
+
+            if (raw instanceof BigDecimal bd) return bd;
+            if (raw instanceof Integer i) return BigDecimal.valueOf(i.longValue());
+            if (raw instanceof Long l) return BigDecimal.valueOf(l);
+            if (raw instanceof Double d) return BigDecimal.valueOf(d);
+            if (raw instanceof Float f) return BigDecimal.valueOf(f.doubleValue());
+
+            if (raw instanceof Number n) return BigDecimal.valueOf(n.doubleValue());
+
+            // Si quieres permitir strings numéricos:
+            if (raw instanceof String s) return new BigDecimal(s);
+
+            throw new IllegalArgumentException("Resultado no numérico para expresión: " + expression + " -> " + raw.getClass());
+        }
+    }
+
+
     // Registry de reglas (nombre -> strategy)
     private final Map<String, RuleStrategy> registry = Map.of(
             "calculoComisionVariable", new CalculoComisionVariable(),
-            "calculoIVA", new CalculoIVA()
+            "calculoIVA", new CalculoIVA(),
+            "Rango-VentaClick", new RangoSpEL()
     );
 
 
@@ -116,6 +210,7 @@ public class ApiForwardChain {
         // Contexto BASE por request (se copia por tercero)
         Map<String, BigDecimal> ctxBase = new HashMap<>();
         ctxBase.put(K_VALOR_VENTA, data.trx().valorVenta());
+
 
         liquidationResults.add("Acuerdo: " + safe(data.acuerdo() != null ? data.acuerdo().nombre() : null));
         liquidationResults.add("ValorVenta: " + data.trx().valorVenta());
@@ -143,7 +238,7 @@ public class ApiForwardChain {
     }
 
 
-    // Motor Forward-chaining
+    // Motor Forward-chaining**
     private List<String> executeForwardChaining(List<Records2.Regla> reglas, Map<String, BigDecimal> ctx) {
 
         List<String> out = new ArrayList<>();
@@ -167,10 +262,16 @@ public class ApiForwardChain {
                 Records2.Regla regla = it.next();
 
                 RuleStrategy strategy = registry.get(regla.nombre());
+
                 if (strategy == null) {
-                    // falla rápido si viene una regla no soportada
-                    throw new IllegalArgumentException("Regla no soportada: " + regla.nombre());
+                    // ✅ fallback: si no está en registry pero viene tipo=RANGO, ejecútalo con SpEL
+                    if ("RANGO".equalsIgnoreCase(regla.tipo())) {
+                        strategy = new RangoSpEL(); // o reutiliza una instancia static final
+                    } else {
+                        throw new IllegalArgumentException("Regla no soportada: " + regla.nombre());
+                    }
                 }
+
 
                 // La regla solo se ejecuta si ya tiene sus insumos
                 if (strategy.canExecute(ctx, regla)) {
@@ -197,7 +298,7 @@ public class ApiForwardChain {
 
         return out;
     }
-
+//
     // Helper
     private static Optional<BigDecimal> getVar(Records2.Regla regla, String name) {
         if (regla.variables() == null) return Optional.empty();
